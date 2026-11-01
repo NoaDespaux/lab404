@@ -1,0 +1,34 @@
+image:
+  # The default rules ship inside the image, so the digest pins the ruleset.
+  tag: 0.45.2@sha256:1562a643953f938e02f47319b5214d93a235f11f646d60e9b8a516fd5a64698e
+
+# Helm replaces lists, so the chart's control-plane tolerations are repeated.
+# The stateful taint keeps Falco off lab404-worker2 unless tolerated exactly.
+tolerations:
+  - effect: NoSchedule
+    key: node-role.kubernetes.io/master
+  - effect: NoSchedule
+    key: node-role.kubernetes.io/control-plane
+  - key: workload
+    operator: Equal
+    value: stateful
+    effect: NoSchedule
+
+driver:
+  kind: modern_ebpf
+  modernEbpf:
+    leastPrivileged: true
+
+# falcoctl would download falco-rules:5 at startup and follow its updates.
+falcoctl:
+  artifact:
+    install:
+      enabled: false
+    follow:
+      enabled: false
+
+falco:
+  json_output: true
+  # Rules change only through a rollout. Watching files also needs an inotify
+  # instance, and Kind nodes share the host's per-user inotify limit.
+  watch_config_files: false

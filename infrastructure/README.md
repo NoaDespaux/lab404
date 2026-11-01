@@ -51,10 +51,22 @@ kubectl wait --namespace kyverno \
 kubectl wait --namespace sealed-secrets \
   --for=condition=Available deployment/sealed-secrets-controller \
   --timeout=5m
+kubectl rollout status daemonset/falco --namespace falco --timeout=5m
 ```
 
 Kustomize renders the pinned Helm charts as ordinary Kubernetes manifests. It
 does not create Helm releases.
+
+Falco runs its `modern_ebpf` driver with the least-privileged capability set,
+which relies on `CAP_PERFMON`. Debian kernels default to
+`kernel.perf_event_paranoid=3`, a Debian-only level that also requires
+`CAP_SYS_ADMIN`, so Falco crash-loops with `perf_event_open() failed:
+Permission denied`. Kind nodes share the host kernel; on such hosts, return to
+the upstream default before installing Falco. The setting is reset at reboot:
+
+```sh
+sudo sysctl kernel.perf_event_paranoid=2
+```
 
 ## Apply the platform configuration
 
