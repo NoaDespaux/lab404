@@ -5,17 +5,47 @@ on:
     branches: [main]
     paths:
       - "apps/**"
+      - "mise.toml"
       - ".github/workflows/images.yml"
   workflow_dispatch:
 
 permissions:
   contents: read
-  packages: write
+
+# Runs for the same ref publish in order, so an older run cannot move latest
+# back after a newer one.
+concurrency:
+  group: images-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  MISE_VERSION: "2026.10.19"
 
 jobs:
-  build:
-    name: Build ${{ matrix.service }} for ${{ matrix.arch }}
+  lint:
+    name: Lint Dockerfiles
     runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - uses: jdx/mise-action@6612f0ef07ed2a736cd1e00a94a065522dd41195 # v5.2.5
+        with:
+          version: ${{ env.MISE_VERSION }}
+          install_args: hadolint
+
+      - name: Run Hadolint
+        run: hadolint apps/web/Dockerfile apps/votes/Dockerfile
+
+  build:
+    name: Build ${{ matrix.service }} for ${{ matrix.target.arch }}
+    needs: lint
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     strategy:
       fail-fast: false
       matrix:
@@ -28,6 +58,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
 
       - uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
 
@@ -38,6 +70,12 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: dhi.io
+          username: ${{ secrets.DHI_USERNAME }}
+          password: ${{ secrets.DHI_TOKEN }}
 
       - id: image
         name: Set image name
@@ -54,24 +92,172 @@ jobs:
           labels: org.opencontainers.image.source=https://github.com/${{ github.repository }}
           outputs: type=image,name=${{ steps.image.outputs.name }},push-by-digest=true,name-canonical=true,push=true
 
-      - name: Export digest
+      # The pushed digest may be a per-platform index that also holds the
+      # provenance attestation; scanners must target the runnable manifest.
+      - name: Export digests
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          ARCH: ${{ matrix.target.arch }}
         run: |
-          mkdir -p /tmp/digests
-          digest="${{ steps.build.outputs.digest }}"
-          touch "/tmp/digests/${digest#sha256:}"
+          manifest="$(docker buildx imagetools inspect --raw "${IMAGE}@${DIGEST}" |
+            jq -r --arg arch "${ARCH}" '
+              if .manifests then
+                [.manifests[] | select(.platform.os == "linux" and .platform.architecture == $arch) | .digest]
+              else
+                [env.DIGEST]
+              end
+              | if length == 1 then .[0] else error("expected exactly one linux/\($arch) manifest") end')"
+          mkdir -p /tmp/build
+          echo "${DIGEST}" > "/tmp/build/${ARCH}.pushed"
+          echo "${manifest}" > "/tmp/build/${ARCH}.manifest"
 
-      - name: Upload digest
+      - name: Upload digests
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: digests-${{ matrix.service }}-${{ matrix.target.arch }}
-          path: /tmp/digests/*
+          name: build-${{ matrix.service }}-${{ matrix.target.arch }}
+          path: /tmp/build/*
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 7
+
+  trivy:
+    name: Trivy ${{ matrix.service }} for ${{ matrix.arch }}
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [web, votes]
+        arch: [amd64, arm64]
+
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - uses: jdx/mise-action@6612f0ef07ed2a736cd1e00a94a065522dd41195 # v5.2.5
+        with:
+          version: ${{ env.MISE_VERSION }}
+          install_args: trivy
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: build-${{ matrix.service }}-${{ matrix.arch }}
+          path: /tmp/build
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: image
+        name: Set image reference
+        env:
+          OWNER: ${{ github.repository_owner }}
+        run: echo "ref=ghcr.io/${OWNER,,}/lab404-${{ matrix.service }}@$(cat /tmp/build/${{ matrix.arch }}.manifest)" >> "$GITHUB_OUTPUT"
+
+      - name: Generate report and SBOM
+        env:
+          REF: ${{ steps.image.outputs.ref }}
+        run: |
+          mkdir -p reports
+          echo "${REF}" > reports/image.txt
+          trivy image --list-all-pkgs --format json --output reports/trivy.json "${REF}"
+          trivy convert --format table --output reports/trivy.txt reports/trivy.json
+          trivy convert --format cyclonedx --output reports/sbom.cdx.json reports/trivy.json
+
+      # Fail only on HIGH or CRITICAL findings that have a released fix; the
+      # full report above keeps every finding as evidence.
+      - name: Enforce vulnerability gate
+        env:
+          REF: ${{ steps.image.outputs.ref }}
+        run: |
+          trivy image --skip-db-update --severity HIGH,CRITICAL --ignore-unfixed \
+            --exit-code 1 "${REF}"
+
+      - name: Upload reports
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: trivy-${{ matrix.service }}-${{ matrix.arch }}
+          path: reports/
+          if-no-files-found: error
+          retention-days: 7
+
+  dockle:
+    name: Dockle ${{ matrix.service }} for ${{ matrix.arch }}
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [web, votes]
+        arch: [amd64, arm64]
+
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - uses: jdx/mise-action@6612f0ef07ed2a736cd1e00a94a065522dd41195 # v5.2.5
+        with:
+          version: ${{ env.MISE_VERSION }}
+          install_args: dockle
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: build-${{ matrix.service }}-${{ matrix.arch }}
+          path: /tmp/build
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: image
+        name: Set image reference
+        env:
+          OWNER: ${{ github.repository_owner }}
+        run: echo "ref=ghcr.io/${OWNER,,}/lab404-${{ matrix.service }}@$(cat /tmp/build/${{ matrix.arch }}.manifest)" >> "$GITHUB_OUTPUT"
+
+      # CIS-DI-0010 matches "access" in gunicorn's --access-logfile flag; only
+      # that exact keyword is accepted, every other credential check stays on.
+      - name: Run Dockle
+        env:
+          REF: ${{ steps.image.outputs.ref }}
+        run: |
+          mkdir -p reports
+          echo "${REF}" > reports/image.txt
+          status=0
+          dockle --exit-code 1 --exit-level warn --accept-key --access-logfile \
+            --format json --output reports/dockle.json "${REF}" || status=$?
+          jq -r '.details[] | "\(.level) \(.code) \(.title)"' reports/dockle.json
+          exit "${status}"
+
+      - name: Upload report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dockle-${{ matrix.service }}-${{ matrix.arch }}
+          path: reports/
+          if-no-files-found: error
+          retention-days: 7
 
   merge:
     name: Publish ${{ matrix.service }} index
-    needs: build
+    needs: [trivy, dockle]
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     strategy:
       matrix:
         service: [web, votes]
@@ -79,8 +265,8 @@ jobs:
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          pattern: digests-${{ matrix.service }}-*
-          path: /tmp/digests
+          pattern: build-${{ matrix.service }}-*
+          path: /tmp/build
           merge-multiple: true
 
       - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
@@ -97,12 +283,95 @@ jobs:
           OWNER: ${{ github.repository_owner }}
         run: echo "name=ghcr.io/${OWNER,,}/lab404-${{ matrix.service }}" >> "$GITHUB_OUTPUT"
 
-      - name: Create multi-platform index
-        working-directory: /tmp/digests
+      # GHCR tags are mutable, so the commit tag is only ever created once.
+      - name: Check commit tag is unused
         env:
           IMAGE: ${{ steps.image.outputs.name }}
+          TAG: sha-${{ github.sha }}
         run: |
-          docker buildx imagetools create \
-            --tag "${IMAGE}:latest" \
-            $(printf "${IMAGE}@sha256:%s " *)
-          docker buildx imagetools inspect "${IMAGE}:latest"
+          if output="$(docker buildx imagetools inspect "${IMAGE}:${TAG}" 2>&1)"; then
+            echo "::error::${IMAGE}:${TAG} already exists and commit tags are immutable"
+            exit 1
+          fi
+          if [[ "${output}" != *": not found"* ]]; then
+            echo "${output}"
+            exit 1
+          fi
+
+      - name: Create multi-platform index
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+          TAG: sha-${{ github.sha }}
+          MOVE_LATEST: ${{ github.ref == 'refs/heads/main' }}
+        run: |
+          mapfile -t sources < <(sed "s|^|${IMAGE}@|" /tmp/build/*.pushed)
+          tags=(--tag "${IMAGE}:${TAG}")
+          if [[ "${MOVE_LATEST}" == "true" ]]; then
+            tags+=(--tag "${IMAGE}:latest")
+          fi
+          docker buildx imagetools create "${tags[@]}" "${sources[@]}"
+
+      - name: Verify and record index
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+          TAG: sha-${{ github.sha }}
+        run: |
+          mkdir -p /tmp/index
+          docker buildx imagetools inspect "${IMAGE}:${TAG}" | tee /tmp/index/index.txt
+          docker buildx imagetools inspect --raw "${IMAGE}:${TAG}" > /tmp/index/index.json
+          jq -e '
+            .mediaType == "application/vnd.oci.image.index.v1+json"
+            and ([.manifests[].platform | select(.os == "linux") | .architecture] | sort == ["amd64", "arm64"])
+          ' /tmp/index/index.json
+          echo "${IMAGE}:${TAG}@sha256:$(sha256sum < /tmp/index/index.json | cut -d' ' -f1)" \
+            > /tmp/index/reference.txt
+
+      - name: Upload index record
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: index-${{ matrix.service }}
+          path: /tmp/index/
+          if-no-files-found: error
+          retention-days: 7
+
+  evidence:
+    name: Upload security evidence
+    needs: merge
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: evidence
+
+      - name: Summarize evidence
+        working-directory: evidence
+        run: |
+          {
+            echo "| Published index |"
+            echo "| --- |"
+            cat index-*/reference.txt | sed 's/.*/| & |/'
+            echo
+            echo "| Image | Platform manifest | Fixable HIGH/CRITICAL | All findings | SBOM components | Dockle |"
+            echo "| --- | --- | --- | --- | --- | --- |"
+            for report in trivy-*/trivy.json; do
+              name="${report%%/*}"
+              name="${name#trivy-}"
+              dockle="dockle-${name}/dockle.json"
+              printf '| %s | %s | %s | %s | %s | %s |\n' \
+                "${name}" \
+                "$(sed 's/.*@//' "trivy-${name}/image.txt")" \
+                "$(jq '[.Results[]?.Vulnerabilities[]? | select((.Severity == "HIGH" or .Severity == "CRITICAL") and .FixedVersion)] | length' "${report}")" \
+                "$(jq '[.Results[]?.Vulnerabilities[]?] | length' "${report}")" \
+                "$(jq '.components | length' "trivy-${name}/sbom.cdx.json")" \
+                "$(jq -r '[.details[] | select(.level == "FATAL" or .level == "WARN") | .code] | if length == 0 then "pass" else join(", ") end' "${dockle}")"
+            done
+          } | tee SUMMARY.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload evidence bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: security-evidence-${{ github.sha }}
+          path: evidence/
+          if-no-files-found: error
+          retention-days: 90
