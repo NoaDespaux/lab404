@@ -48,6 +48,9 @@ kubectl wait --namespace kyverno \
   --for=condition=Available deployment \
   --all \
   --timeout=5m
+kubectl wait --namespace sealed-secrets \
+  --for=condition=Available deployment/sealed-secrets-controller \
+  --timeout=5m
 ```
 
 Kustomize renders the pinned Helm charts as ordinary Kubernetes manifests. It

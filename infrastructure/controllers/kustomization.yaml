@@ -37,3 +37,12 @@ helmCharts:
     # scale Kyverno to zero and remove its webhooks right after install.
     skipHooks: true
     skipTests: true
+  - name: sealed-secrets
+    repo: https://bitnami.github.io/sealed-secrets
+    version: 2.22.0
+    releaseName: sealed-secrets
+    namespace: sealed-secrets
+    includeCRDs: true
+    valuesInline:
+      # The controller name kubeseal looks for by default.
+      fullnameOverride: sealed-secrets-controller

@@ -6,6 +6,7 @@ resources:
   - web.yaml
   - votes.yaml
   - valkey.yaml
+  - valkey-sealedsecret.yaml
   - gateway.yaml
   - nginx.yaml
   - require-image-digests.yaml
