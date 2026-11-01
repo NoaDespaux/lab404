@@ -3,6 +3,7 @@ kind: Kustomization
 
 resources:
   - namespaces.yaml
+  - kyverno-reports-rbac.yaml
 
 helmGlobals:
   chartHome: .cache/charts
@@ -26,3 +27,13 @@ helmCharts:
     releaseName: otel-collector
     namespace: observability
     valuesFile: opentelemetry-values.yaml
+  - name: kyverno
+    repo: https://kyverno.github.io/kyverno/
+    version: 3.9.2
+    releaseName: kyverno
+    namespace: kyverno
+    includeCRDs: true
+    # Kustomize renders hooks as plain resources: the pre-delete Jobs would
+    # scale Kyverno to zero and remove its webhooks right after install.
+    skipHooks: true
+    skipTests: true

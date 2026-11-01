@@ -8,3 +8,4 @@ resources:
   - valkey.yaml
   - gateway.yaml
   - nginx.yaml
+  - require-image-digests.yaml

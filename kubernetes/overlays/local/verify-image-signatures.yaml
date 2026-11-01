@@ -1,0 +1,46 @@
+apiVersion: policies.kyverno.io/v1
+kind: ImageValidatingPolicy
+metadata:
+  name: verify-image-signatures
+spec:
+  validationActions:
+    - Deny
+  failurePolicy: Fail
+  matchConstraints:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: lab404
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: [v1]
+        operations: [CREATE, UPDATE]
+        resources: [pods]
+      # kubectl debug adds ephemeral containers through this subresource.
+      - apiGroups: [""]
+        apiVersions: [v1]
+        operations: [UPDATE]
+        resources: [pods/ephemeralcontainers]
+  # Exact repositories only: a bare prefix glob would also match lab404-web-*.
+  matchImageReferences:
+    - glob: ghcr.io/noadespaux/lab404-web@*
+    - glob: ghcr.io/noadespaux/lab404-web:*
+    - glob: ghcr.io/noadespaux/lab404-votes@*
+    - glob: ghcr.io/noadespaux/lab404-votes:*
+  validationConfigurations:
+    # Rewriting tags into digests would let tag references pass the digest rule.
+    mutateDigest: false
+    verifyDigest: true
+    required: true
+  attestors:
+    - name: github
+      cosign:
+        keyless:
+          identities:
+            - subject: https://github.com/NoaDespaux/lab404/.github/workflows/images.yml@refs/heads/main
+              issuer: https://token.actions.githubusercontent.com
+  validations:
+    # images holds every matched image per kind: containers, initContainers
+    # and ephemeralContainers.
+    - expression: >-
+        images.all(kind, images[kind].map(image, verifyImageSignatures(image, [attestors.github])).all(e, e > 0))
+      message: images must be signed by the lab404 main-branch image workflow

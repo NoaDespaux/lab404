@@ -1,0 +1,12 @@
+# Policies that match pods/ephemeralcontainers only report as ready when the
+# reports controller can read that subresource; it already reads pods.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kyverno:reports-controller:ephemeral-containers
+  labels:
+    rbac.kyverno.io/aggregate-to-reports-controller: "true"
+rules:
+  - apiGroups: [""]
+    resources: [pods/ephemeralcontainers]
+    verbs: [get, list, watch]

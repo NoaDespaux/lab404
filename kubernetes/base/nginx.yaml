@@ -20,7 +20,8 @@ spec:
     spec:
       containers:
         - name: nginx
-          image: nginx:latest
+          # The 1.31.8 build deployed with the baseline; the tag was rebuilt since.
+          image: nginx:1.31.8@sha256:4c41e2d0a3a55b325ed572cd0200bdb72af1433c3daa2bca6ef8eea68ce504a2
           ports:
             - name: http
               containerPort: 80

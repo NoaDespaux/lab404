@@ -44,6 +44,10 @@ kubectl wait --namespace envoy-gateway-system \
 kubectl wait --namespace observability \
   --for=condition=Available deployment/otel-collector \
   --timeout=5m
+kubectl wait --namespace kyverno \
+  --for=condition=Available deployment \
+  --all \
+  --timeout=5m
 ```
 
 Kustomize renders the pinned Helm charts as ordinary Kubernetes manifests. It

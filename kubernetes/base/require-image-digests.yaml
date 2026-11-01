@@ -1,0 +1,30 @@
+apiVersion: policies.kyverno.io/v1
+kind: NamespacedValidatingPolicy
+metadata:
+  name: require-image-digests
+spec:
+  validationActions:
+    - Deny
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: [v1]
+        operations: [CREATE, UPDATE]
+        resources: [pods]
+      # kubectl debug adds ephemeral containers through this subresource.
+      - apiGroups: [""]
+        apiVersions: [v1]
+        operations: [UPDATE]
+        resources: [pods/ephemeralcontainers]
+  variables:
+    - name: images
+      expression: >-
+        object.spec.containers.map(c, c.name + '=' + c.image) +
+        (has(object.spec.initContainers) ? object.spec.initContainers.map(c, c.name + '=' + c.image) : []) +
+        (has(object.spec.ephemeralContainers) ? object.spec.ephemeralContainers.map(c, c.name + '=' + c.image) : [])
+    - name: mutable
+      expression: variables.images.filter(i, !i.matches('@sha256:[a-f0-9]{64}$'))
+  validations:
+    - expression: size(variables.mutable) == 0
+      messageExpression: "'images must be pinned by digest: ' + variables.mutable.join(', ')"
