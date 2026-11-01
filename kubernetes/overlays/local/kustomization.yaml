@@ -5,8 +5,8 @@ resources:
 images:
   - name: ghcr.io/leofvo/lab404-web
     newName: ghcr.io/noadespaux/lab404-web
-    newTag: sha-90c197f358559834e136ed2c09a9ab00634406f1
+    digest: sha256:9081386d3f8ed01f41c95442e22822bd92925f384aaa4399ba9b42f1206537c1
   - name: ghcr.io/leofvo/lab404-votes
     newName: ghcr.io/noadespaux/lab404-votes
-    newTag: sha-90c197f358559834e136ed2c09a9ab00634406f1
+    digest: sha256:961ad76544950c11a83523c1a7011e76e438558f6adc17cf328bc51125d06867
 
