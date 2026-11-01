@@ -1,13 +1,12 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
-  - ../../base
-  - verify-image-signatures.yaml
+- ../../base
+- verify-image-signatures.yaml
 images:
-  - name: ghcr.io/leofvo/lab404-web
-    newName: ghcr.io/noadespaux/lab404-web
-    digest: sha256:9081386d3f8ed01f41c95442e22822bd92925f384aaa4399ba9b42f1206537c1
-  - name: ghcr.io/leofvo/lab404-votes
-    newName: ghcr.io/noadespaux/lab404-votes
-    digest: sha256:961ad76544950c11a83523c1a7011e76e438558f6adc17cf328bc51125d06867
-
+- digest: sha256:025944e4fe6e7bc35f0f5c18bbbcec5d2e1f1683e2a8769b473045945b0a77a8
+  name: ghcr.io/leofvo/lab404-votes
+  newName: ghcr.io/noadespaux/lab404-votes
+- digest: sha256:d1ec51c39bdea30a01af4af9cb23c815693acd8032782cc72de0604abc1fd31b
+  name: ghcr.io/leofvo/lab404-web
+  newName: ghcr.io/noadespaux/lab404-web
