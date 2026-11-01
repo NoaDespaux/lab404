@@ -334,9 +334,95 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  sign:
+    name: Sign ${{ matrix.service }} index
+    needs: merge
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      packages: write
+      id-token: write
+    strategy:
+      matrix:
+        service: [web, votes]
+
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: index-${{ matrix.service }}
+          path: /tmp/index
+
+      # Without contents access this job does not check out mise.toml; keep
+      # this release in sync with the cosign version pinned there.
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.1.4
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: index
+        name: Read index digest
+        run: |
+          reference="$(cat /tmp/index/reference.txt)"
+          ref="${reference%%:*}@${reference##*@}"
+          if [[ ! "${ref}" =~ ^ghcr\.io/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::unexpected index reference: ${reference}"
+            exit 1
+          fi
+          echo "ref=${ref}" >> "$GITHUB_OUTPUT"
+
+      # Keyless signing: the certificate binds the signature to this
+      # workflow's GitHub OIDC identity, so no signing key is stored.
+      - name: Sign index and child manifests
+        env:
+          REF: ${{ steps.index.outputs.ref }}
+        run: cosign sign --yes --recursive "${REF}"
+
+      # The index and each runnable image must carry a signature from this
+      # exact workflow file, ref and commit, issued by GitHub's OIDC provider.
+      - name: Verify signatures
+        env:
+          REF: ${{ steps.index.outputs.ref }}
+          IDENTITY: ${{ github.server_url }}/${{ github.workflow_ref }}
+          ISSUER: https://token.actions.githubusercontent.com
+          SHA: ${{ github.sha }}
+        run: |
+          mapfile -t children < <(docker buildx imagetools inspect --raw "${REF}" |
+            jq -r '.manifests[] | select(.platform.os == "linux") | "\(.platform.architecture) \(.digest)"' |
+            sort)
+          if [[ "${#children[@]}" -ne 2 || "${children[0]%% *}" != amd64 || "${children[1]%% *}" != arm64 ]]; then
+            echo "::error::expected exactly linux/amd64 and linux/arm64 in ${REF}"
+            exit 1
+          fi
+          mkdir -p /tmp/signature
+          verify() {
+            cosign verify \
+              --certificate-identity "${IDENTITY}" \
+              --certificate-oidc-issuer "${ISSUER}" \
+              --certificate-github-workflow-sha "${SHA}" \
+              "$1" > "/tmp/signature/$2.json"
+          }
+          verify "${REF}" index
+          for child in "${children[@]}"; do
+            verify "${REF%@*}@${child#* }" "${child%% *}"
+          done
+          echo "${IDENTITY}" > /tmp/signature/identity.txt
+
+      - name: Upload verification record
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: signature-${{ matrix.service }}
+          path: /tmp/signature/
+          if-no-files-found: error
+          retention-days: 7
+
   evidence:
     name: Upload security evidence
-    needs: merge
+    needs: sign
     runs-on: ubuntu-latest
 
     steps:
@@ -348,9 +434,21 @@ jobs:
         working-directory: evidence
         run: |
           {
-            echo "| Published index |"
-            echo "| --- |"
-            cat index-*/reference.txt | sed 's/.*/| & |/'
+            echo "| Published index | Verified signatures |"
+            echo "| --- | --- |"
+            for record in index-*/reference.txt; do
+              service="${record%%/*}"
+              service="${service#index-}"
+              verified=0
+              for result in signature-"${service}"/{index,amd64,arm64}.json; do
+                if [[ -s "${result}" ]]; then
+                  verified=$((verified + 1))
+                fi
+              done
+              printf '| %s | %s |\n' "$(cat "${record}")" "${verified}/3 (index, amd64, arm64)"
+            done
+            echo
+            echo "Signer identity: $(cat signature-web/identity.txt)"
             echo
             echo "| Image | Platform manifest | Fixable HIGH/CRITICAL | All findings | SBOM components | Dockle |"
             echo "| --- | --- | --- | --- | --- | --- |"
